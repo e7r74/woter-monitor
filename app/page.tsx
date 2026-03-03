@@ -3,18 +3,41 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import dynamic from 'next/dynamic'
 import { useRouter } from 'next/navigation'
+import Link from 'next/link'
 
+// --- Типизация данных Wialon ---
+interface WialonSensor {
+  id: number
+  n: string // Имя датчика (например, "Уровень")
+  t: string // Тип датчика
+  p: string // Параметр (например, "adc3")
+}
+
+interface WialonUnit {
+  nm: string
+  sens: Record<string, WialonSensor>
+  pvs?: Record<string, { v: number; t: number }> // Последние вычисленные значения
+  lmsg?: {
+    p?: Record<string, number>
+  }
+  pos?: {
+    x: number
+    y: number
+  }
+}
+
+// Динамический импорт карты для предотвращения ошибок SSR
 const Map = dynamic(() => import('./components/Map'), {
   ssr: false,
   loading: () => <div className="h-[400px] bg-slate-800 animate-pulse rounded-3xl" />,
 })
 
-// ТОКЕН ЗДЕСЬ БОЛЬШЕ НЕ НУЖЕН - МЫ ЕГО УДАЛИЛИ
-
 export default function Dashboard() {
   const router = useRouter()
 
-  const [isAuth, setIsAuth] = useState<boolean | null>(null)
+  const [mounted, setMounted] = useState(false)
+  const [isAuth, setIsAuth] = useState(false)
+
   const [sensorData, setSensorData] = useState({
     name: 'Загрузка...',
     level: 0,
@@ -25,34 +48,22 @@ export default function Dashboard() {
 
   const handleLogout = () => {
     localStorage.removeItem('isLoggedIn')
+    setIsAuth(false)
     router.push('/login')
   }
 
   const updateData = useCallback(async () => {
     try {
-      // 1. ЛОГИН: Теперь отправляем ПУСТЫЕ параметры.
-      // Сервер сам подставит токен из .env.local, когда увидит svc: 'token/login'
       const loginRes = await fetch('/api/wialon', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          svc: 'token/login',
-          params: {}, // Пустой объект, так как токен спрятан на сервере
-        }),
+        body: JSON.stringify({ svc: 'token/login', params: {} }),
       })
-
-      const contentType = loginRes.headers.get('content-type')
-      if (!loginRes.ok || !contentType?.includes('application/json')) {
-        console.error('Ошибка API: Проверьте работу прокси и наличие WIALON_TOKEN в .env.local')
-        return
-      }
 
       const loginData = await loginRes.json()
       const eid = loginData.eid
-
       if (!eid) return
 
-      // 2. ПОЛУЧЕНИЕ ДАННЫХ: Здесь всё остается так же
       const dataRes = await fetch('/api/wialon', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -61,7 +72,8 @@ export default function Dashboard() {
           params: {
             spec: { itemsType: 'avl_unit', propName: 'sys_name', propValueMask: '*', sortType: 'sys_name' },
             force: 1,
-            flags: 1153,
+            // ПРОВЕРЬ ТУТ: должно быть строго 5121
+            flags: 5121,
             from: 0,
             to: 0,
           },
@@ -73,11 +85,29 @@ export default function Dashboard() {
 
       if (result.items && result.items[0]) {
         const unit = result.items[0]
-        const adcValue = unit.lmsg?.p?.adc3 || 0
+        let waterLevel = 0
+
+        if (unit.sens && unit.sens['1']) {
+          const sensor = unit.sens['1']
+          const rawValue = unit.lmsg?.p?.[sensor.p] || 0
+
+          // Пытаемся взять готовое значение из pvs
+          if (unit.pvs && unit.pvs['1']) {
+            waterLevel = unit.pvs['1'].v
+          }
+          // Если pvs пуст (как в твоем случае), считаем вручную по таблице из консоли
+          else if (sensor.tbl && sensor.tbl.length > 0) {
+            // Для значения 130 подходит первая строка таблицы (индекс 0)
+            const row = sensor.tbl[0]
+            waterLevel = row.a * rawValue + row.b
+          } else {
+            waterLevel = rawValue
+          }
+        }
 
         setSensorData({
           name: unit.nm,
-          level: parseFloat((adcValue * 42.625).toFixed(2)),
+          level: parseFloat(Number(waterLevel).toFixed(2)), // Округлит до 4.49
           lat: unit.pos?.y || 43.2425,
           lng: unit.pos?.x || 76.9592,
           lastUpdate: new Date().toLocaleTimeString(),
@@ -89,17 +119,23 @@ export default function Dashboard() {
   }, [])
 
   useEffect(() => {
-    const loggedIn = localStorage.getItem('isLoggedIn')
+    const loggedIn = localStorage.getItem('isLoggedIn') === 'true'
+
+    const initialize = async () => {
+      setMounted(true)
+      setIsAuth(loggedIn)
+    }
+
+    initialize()
 
     if (!loggedIn) {
       router.push('/login')
-    } else {
-      Promise.resolve().then(() => setIsAuth(true))
+      return
     }
 
     let isMounted = true
     const tick = async () => {
-      if (isMounted && loggedIn) await updateData()
+      if (isMounted) await updateData()
     }
 
     tick()
@@ -111,7 +147,7 @@ export default function Dashboard() {
     }
   }, [router, updateData])
 
-  if (isAuth !== true) {
+  if (!mounted || !isAuth) {
     return <div className="min-h-screen bg-slate-900" />
   }
 
@@ -120,7 +156,7 @@ export default function Dashboard() {
       <div className="max-w-4xl mx-auto space-y-6">
         <div className="flex justify-between items-center">
           <h1 className="text-xl font-bold text-slate-400 uppercase tracking-widest">
-            {sensorData.name} <span className="text-slate-200 ml-4">Ulzhan Quanyshbekkyzy</span>
+            <span className="text-slate-200 ml-4">Ulzhan Quanyshbekkyzy</span>
           </h1>
           <button
             onClick={handleLogout}
@@ -129,7 +165,7 @@ export default function Dashboard() {
           </button>
         </div>
 
-        <div className="bg-slate-800 rounded-[2rem] p-8 border border-slate-700 shadow-2xl flex flex-col md:flex-row justify-between items-center">
+        <div className="bg-slate-800 rounded-4xl p-8 border border-slate-700 shadow-2xl flex flex-col md:flex-row justify-between items-center">
           <div className="text-center md:text-left">
             <span className="text-sm text-slate-500 uppercase tracking-tighter">Текущий уровень</span>
             <div className="flex items-baseline gap-2">
@@ -138,14 +174,19 @@ export default function Dashboard() {
             </div>
           </div>
           <div className="bg-slate-900/50 p-6 rounded-2xl border border-slate-700 text-center">
-            <p className="text-[10px] text-slate-500 uppercase mb-2">Обновлено</p>
+            <p className="text-[10px] text-slate-500 uppercase mb-2">Время обновления</p>
             <p className="text-xl font-mono text-blue-300">{sensorData.lastUpdate || '--:--:--'}</p>
           </div>
         </div>
 
-        <div className="overflow-hidden rounded-[2rem] border border-slate-700 shadow-2xl">
+        <div className="overflow-hidden rounded-4xl border border-slate-700 shadow-2xl">
           <Map pos={[sensorData.lat, sensorData.lng]} name={sensorData.name} />
         </div>
+        <Link
+          href="/water-report"
+          className="bg-blue-600 hover:bg-blue-500 text-white px-6 py-3 rounded-xl transition-all font-medium shadow-lg shadow-blue-900/20 active:scale-95">
+          Перейти к отчету
+        </Link>
       </div>
     </main>
   )
