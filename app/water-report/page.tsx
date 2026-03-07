@@ -25,7 +25,6 @@ const Map = dynamic(() => import('../components/Map'), {
   ssr: false,
   loading: () => <div className="h-75 bg-slate-800 animate-pulse rounded-4xl" />,
 })
-
 export default function WaterReportPage() {
   const [hasRendered, setHasRendered] = useState(false)
   const [chartData, setChartData] = useState<ChartPoint[]>([])
